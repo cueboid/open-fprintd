@@ -3,6 +3,7 @@ import dbus
 import dbus.service
 import logging
 import pwd
+from gi.repository import GLib
 
 
 INTERFACE_NAME = 'net.reactivated.Fprint.Device'
@@ -28,27 +29,87 @@ class PermissionDenied(dbus.DBusException):
 class Device(dbus.service.Object):
     cnt=0
 
-    def __init__(self, mgr, target_name):
+    def __init__(self, mgr):
         self.manager = mgr
         bus_name = mgr.bus_name
         dbus.service.Object.__init__(self, bus_name, '/net/reactivated/Fprint/Device/%d' % Device.cnt)
         Device.cnt += 1
         self.bus = bus_name.get_bus()
-
-        self.target = self.bus.get_object(target_name, '/io/github/uunicorn/Fprint/Device', introspect=False)
         self.target_props = dbus.Dictionary({ 
                 'name':  'DBus driver', 
                 'num-enroll-stages': 5,
                 'scan-type': 'press'
             })
-        self.target = dbus.Interface(self.target, 'io.github.uunicorn.Fprint.Device')
-        self.target.connect_to_signal('VerifyStatus', self.VerifyStatus)
-        self.target.connect_to_signal('VerifyFingerSelected', self.VerifyFingerSelected)
-        self.target.connect_to_signal('EnrollStatus', self.EnrollStatus)
         self.owner_watcher = None
         self.claimed_by = None
         self.claim_sender = None
         self.busy = False
+
+        self.suspended = False
+        self.callbacks = []
+
+    def proxy_call(self, cb):
+        if self.suspended or self.target is None:
+            logging.debug('The service is suspended / offline, delay the call')
+            self.callbacks += [cb]
+        else:
+            cb()
+
+
+    def call_cbs(self):
+        for cb in self.callbacks:
+            try:
+                cb()
+            except Exception as e:
+                logging.debug('callback resulted in error: %s' % repr(e))
+
+        logging.debug('Callbacks complete')
+
+        self.suspended = False
+        self.callbacks = []
+
+    def set_target(self, target_name, sender):
+        self.target = self.bus.get_object(sender, target_name, introspect=False)
+        self.target = dbus.Interface(self.target, 'io.github.uunicorn.Fprint.Device')
+        self.target.connect_to_signal('VerifyStatus', self.VerifyStatus)
+        self.target.connect_to_signal('VerifyFingerSelected', self.VerifyFingerSelected)
+        self.target.connect_to_signal('EnrollStatus', self.EnrollStatus)
+
+        watcher = None
+        def watch_cb(name):
+            if name == '':
+                logging.debug('%s went offline' % sender)
+                self.unset_target()
+                #self.remove_from_connection()
+                watcher.cancel()
+        watcher = self.connection.watch_name_owner(sender, watch_cb)
+
+        # We called from RegisterDeivce DBus method. 
+        # Calling device methods from here will cause a deadlock.
+        # Postpone processing till RegisterDeivce method is finished.
+
+        def process_offline():
+            if not self.suspended:
+                self.call_cbs()
+
+        GLib.idle_add(process_offline)
+
+    def unset_target(self):
+        self.target = None
+
+    def Resume(self):
+        self.suspended = False
+
+        if self.target is not None:
+            self.target.Resume()
+
+            self.call_cbs()
+
+    def Suspend(self):
+        self.suspended = True
+
+        if self.target is not None:
+            self.target.Suspend()
 
     # ------------------ Template Database --------------------------
 
@@ -69,7 +130,7 @@ class Device(dbus.service.Object):
         def cb():
             callback(self.target.ListEnrolledFingers(username, signature='s'))
 
-        self.manager.proxy_call(cb)
+        self.proxy_call(cb)
 
     @dbus.service.method(dbus_interface=INTERFACE_NAME,
                          in_signature='s', 

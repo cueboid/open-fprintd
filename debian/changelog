@@ -1,3 +1,10 @@
+open-fprintd (0.7~ppa2) noble; urgency=medium
+
+  * switching to noble
+  * improve suspend/resume handling
+
+ -- unicorn <viktor.dragomiretskyy@gmail.com>  Mon, 09 Jun 2025 20:49:19 +1200
+
 open-fprintd (0.6~ppa1) bionic; urgency=medium
 
   * Add laptop Suspend/Resume methods to properly handle sensor lifecycle. 

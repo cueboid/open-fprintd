@@ -1,7 +1,6 @@
 
 import dbus.service
 import logging
-
 from openfprintd.device import Device
 
 INTERFACE_NAME = 'net.reactivated.Fprint.Manager'
@@ -13,16 +12,7 @@ class Manager(dbus.service.Object):
     def __init__(self, bus_name):
         dbus.service.Object.__init__(self, bus_name, '/net/reactivated/Fprint/Manager')
         self.bus_name = bus_name
-        self.devices = []
-        self.suspended = False
-        self.callbacks = []
-
-    def proxy_call(self, cb):
-        if self.suspended:
-            logging.debug('The service is suspended, delay the call')
-            self.callbacks += [cb]
-        else:
-            cb()
+        self.devices = {}
 
     @dbus.service.method(dbus_interface=INTERFACE_NAME,
                          in_signature='', 
@@ -31,7 +21,7 @@ class Manager(dbus.service.Object):
                          sender_keyword='sender')
     def GetDevices(self, sender, connection):
         logging.debug("GetDevices")
-        return self.devices
+        return self.devices.values()
 
     @dbus.service.method(dbus_interface=INTERFACE_NAME,
                          in_signature='', 
@@ -42,9 +32,13 @@ class Manager(dbus.service.Object):
         logging.debug("GetDefaultDevice")
 
         if len(self.devices) == 0:
+            logging.debug('no devices')
             raise NoSuchDevice()
 
-        return self.devices[0]
+        v = list(self.devices.values())
+        logging.debug('returning %s' % repr(v[0]))
+
+        return v[0]
 
     # TODO: use a different interface name for this
     @dbus.service.method(dbus_interface=INTERFACE_NAME,
@@ -54,21 +48,13 @@ class Manager(dbus.service.Object):
                          sender_keyword='sender')
     def RegisterDevice(self, dev, sender, connection):
         # TODO: polkit: make sure we're talking to a root process!
-        logging.debug('RegisterDevice')
+        logging.debug('RegisterDevice %s %s' % (sender, repr(dev)))
 
-        # TODO: don't ignore dev parameter.
-        # For now, one bus name may have only one device with a well known path
-        wrap = Device(self, sender)
-        self.devices += [wrap]
+        if dev not in self.devices:
+            self.devices[dev] = Device(self)
 
-        watcher = None
-        def watch_cb(name):
-            if name == '':
-                logging.debug('%s went offline' % sender)
-                self.devices.remove(wrap)
-                wrap.remove_from_connection()
-                watcher.cancel()
-        watcher = connection.watch_name_owner(sender, watch_cb)
+        wrap = self.devices[dev]
+        wrap.set_target(dev, sender)
         
     @dbus.service.method(dbus_interface=INTERFACE_NAME,
                          in_signature='', 
@@ -78,10 +64,10 @@ class Manager(dbus.service.Object):
     def Suspend(self, sender, connection):
         logging.debug('Suspend')
 
-        self.suspended = True
+        for dev in self.devices.values():
+            dev.Suspend()
 
-        for dev in self.devices:
-            dev.target.Suspend()
+        logging.debug('Suspend complete')
 
     @dbus.service.method(dbus_interface=INTERFACE_NAME,
                          in_signature='', 
@@ -91,12 +77,7 @@ class Manager(dbus.service.Object):
     def Resume(self, sender, connection):
         logging.debug('Resume')
 
-        for dev in self.devices:
-            dev.target.Resume()
+        for dev in self.devices.values():
+            dev.Resume()
 
-        for cb in self.callbacks:
-            cb()
-
-        self.callbacks = []
-        self.suspended = False
-
+        logging.debug('Resume complete')
